@@ -9,7 +9,7 @@ import Foundation
 
 class HttpServer
 {
-    typealias Handler = (String, String, Dictionary<String,String>) -> HttpResponse
+    typealias Handler = HttpRequest -> HttpResponse
     
     var handlers: [(expression: NSRegularExpression, handler: Handler)] = []
     var acceptSocket: CInt = -1
@@ -30,7 +30,7 @@ class HttpServer
         set ( newValue ) {
             if let regex: NSRegularExpression = NSRegularExpression.regularExpressionWithPattern(path, options: expressionOptions, error: nil) {
                 if let newHandler = newValue {
-                    handlers += (expression: regex, handler: newHandler)
+                    handlers.append(expression: regex, handler: newHandler)
                 }
             }
         }
@@ -42,12 +42,13 @@ class HttpServer
         }
         set ( directoryPath ) {
             if let regex = NSRegularExpression.regularExpressionWithPattern(path, options: expressionOptions, error: nil) {
-                handlers += (expression: regex, handler: { (method, path, headers) in
-                    if let result = regex.firstMatchInString(path, options: self.matchingOptions, range: NSMakeRange(0, path.lengthOfBytesUsingEncoding(NSASCIIStringEncoding))) {
-                        let filesPath = directoryPath.stringByAppendingPathComponent(path.bridgeToObjectiveC().substringWithRange(result.rangeAtIndex(1)))
-                        if let fileBody = String.stringWithContentsOfFile(filesPath, encoding: NSASCIIStringEncoding, error: nil) {
-                            return HttpResponse.OK(.RAW(fileBody))
-                        }
+                handlers.append(expression: regex, handler: { request in
+                    let result = regex.firstMatchInString(request.url, options: self.matchingOptions, range: NSMakeRange(0, request.url.lengthOfBytesUsingEncoding(NSASCIIStringEncoding)))
+                    let nsPath: NSString = request.url
+                    let filesPath = directoryPath.stringByExpandingTildeInPath
+                        .stringByAppendingPathComponent(nsPath.substringWithRange(result!.rangeAtIndex(1)))
+                    if let fileBody = String.stringWithContentsOfFile(filesPath, encoding: NSASCIIStringEncoding, error: nil) {
+                        return HttpResponse.OK(.RAW(fileBody))
                     }
                     return HttpResponse.NotFound
                 })
@@ -57,7 +58,7 @@ class HttpServer
     
     func routes() -> Array<String> {
         var results = [String]()
-        for (expression,_) in handlers { results += expression.pattern }
+        for (expression,_) in handlers { results.append(expression.pattern) }
         return results
     }
     
@@ -69,10 +70,10 @@ class HttpServer
                 while let socket = Socket.acceptClientSocket(self.acceptSocket) {
                     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), {
                         let parser = HttpParser()
-                        while let (path, method, headers) = parser.nextHttpRequest(socket) {
-                            let keepAlive = parser.supportsKeepAlive(headers)
-                            if let handler: Handler = self[path] {
-                                HttpServer.writeResponse(socket, response: handler(method, path, headers), keepAlive: keepAlive)
+                        while let request = parser.nextHttpRequest(socket) {
+                            let keepAlive = parser.supportsKeepAlive(request.headers)
+                            if let handler: Handler = self[request.url] {
+                                HttpServer.writeResponse(socket, response: handler(request), keepAlive: keepAlive)
                             } else {
                                 HttpServer.writeResponse(socket, response: HttpResponse.NotFound, keepAlive: keepAlive)
                             }
@@ -92,8 +93,9 @@ class HttpServer
         Socket.writeStringUTF8(socket, string: "HTTP/1.1 \(response.statusCode()) \(response.reasonPhrase())\r\n")
         let messageBody = response.body()
         if let body = messageBody {
-            let nsdata = body.bridgeToObjectiveC().dataUsingEncoding(NSUTF8StringEncoding)
-            Socket.writeStringUTF8(socket, string: "Content-Length: \(nsdata.length)\r\n")
+            if let nsdata = body.dataUsingEncoding(NSUTF8StringEncoding) {
+                Socket.writeStringUTF8(socket, string: "Content-Length: \(nsdata.length)\r\n")
+            }
         } else {
             Socket.writeStringUTF8(socket, string: "Content-Length: 0\r\n")
         }
